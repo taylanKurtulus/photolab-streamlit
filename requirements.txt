@@ -1,1 +1,8 @@
-requirements.txt
+streamlit==1.39.0
+streamlit-webrtc==0.47.7
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+pandas==2.2.2
+plotly==5.24.1
+kaleido==0.2.1
+av==10.0.0
