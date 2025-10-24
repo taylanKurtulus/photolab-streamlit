@@ -65,89 +65,112 @@ tab_live, tab_upload, tab_analyze = st.tabs(["🔴 Canlı Ölçüm", "📂 Video
 
 # ------------- 1) CANLI ÖLÇÜM -------------
 with tab_live:
-    st.markdown("**Kameradan canlı ölçüm** — ortalama R,G,B ve Gray zaman serisi üretir.")
+    st.markdown("**Kameradan canlı ölçüm (R, G, B ve Gray)**")
+
+    # --- Ayarlar / Durum ---
     rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    if "start_ts" not in st.session_state: st.session_state["start_ts"] = None
+    if "live_t"   not in st.session_state: st.session_state["live_t"]   = []
+    if "live_R"   not in st.session_state: st.session_state["live_R"]   = []
+    if "live_G"   not in st.session_state: st.session_state["live_G"]   = []
+    if "live_B"   not in st.session_state: st.session_state["live_B"]   = []
+    if "live_Gray" not in st.session_state: st.session_state["live_Gray"] = []
+    if "live_q"   not in st.session_state: st.session_state["live_q"]   = queue.Queue(maxsize=4096)
 
-    st.session_state.setdefault("live_t", [])
-    st.session_state.setdefault("live_R", [])
-    st.session_state.setdefault("live_G", [])
-    st.session_state.setdefault("live_B", [])
-    start_ts = st.session_state.get("start_ts", None)
-
+    # --- Video işleyici: RGB ortalamasını kuyrukla aktar ---
     class VideoProcessor:
         def __init__(self):
             self.frame_count = 0
 
-        def recv(self, frame: av.VideoFrame):
-            img = frame.to_ndarray(format="bgr24")  # HxWx3 BGR
-            h, w, _ = img.shape
-            # Ortalama RGB
-            b = img[:, :, 0].mean()
-            g = img[:, :, 1].mean()
-            r = img[:, :, 2].mean()
-            # Zaman damgası
-            global start_ts
-            if start_ts is None:
-                start_ts = time.time()
-                st.session_state["start_ts"] = start_ts
-            t = time.time() - start_ts
+        def recv(self, frame):
+            img = frame.to_ndarray(format="bgr24")  # HxWx3
+            b = float(img[:, :, 0].mean())
+            g = float(img[:, :, 1].mean())
+            r = float(img[:, :, 2].mean())
 
-            # Örnekleme hızı kontrolü:
-            # stream 30 fps olsa da, sadece (fps) hızında örnek alalım
+            if st.session_state["start_ts"] is None:
+                st.session_state["start_ts"] = time.time()
+            t = time.time() - st.session_state["start_ts"]
+
+            # 30 fps kaynak → slider’daki fps’e indir
             self.frame_count += 1
-            # Basit subsample: her n karede bir kayıt
             nskip = max(1, round(30 / fps))
             if self.frame_count % nskip == 0:
-                st.session_state["live_t"].append(t)
-                st.session_state["live_R"].append(r)
-                st.session_state["live_G"].append(g)
-                st.session_state["live_B"].append(b)
-
+                try:
+                    st.session_state["live_q"].put_nowait((t, r, g, b))
+                except queue.Full:
+                    pass
             return frame
 
-    colL, colR = st.columns([2, 1])
-    with colL:
-        ctx = webrtc_streamer(
-            key="camera",
-            mode=WebRtcMode.SENDONLY,
-            rtc_configuration=rtc_configuration,
-            media_stream_constraints={"video": True, "audio": False},
-            video_processor_factory=VideoProcessor,
-        )
-    with colR:
-        if st.button("⏹️ Sıfırla / Yeni Kayıt"):
-            st.session_state["live_t"] = []
-            st.session_state["live_R"] = []
-            st.session_state["live_G"] = []
-            st.session_state["live_B"] = []
-            st.session_state["start_ts"] = None
-            st.success("Temizlendi.")
+    # --- WebRTC başlat ---
+    ctx = webrtc_streamer(
+        key="camera",
+        mode=WebRtcMode.SENDONLY,
+        rtc_configuration=rtc_configuration,
+        media_stream_constraints={"video": True, "audio": False},
+        video_processor_factory=VideoProcessor,
+        async_processing=True,   # canlıyı akıcı yapar
+    )
 
-        if len(st.session_state["live_t"]) > 3:
-            df_live = pd.DataFrame({
-                "time": st.session_state["live_t"],
-                "R": st.session_state["live_R"],
-                "G": st.session_state["live_G"],
-                "B": st.session_state["live_B"],
-            })
-            df_live["Gray"] = 0.114*df_live["B"] + 0.587*df_live["G"] + 0.299*df_live["R"]
-            st.markdown(df_download_link(df_live, "live_rgb.csv"), unsafe_allow_html=True)
+    # --- Reset butonu ---
+    if st.button("⏹️ Sıfırla / Yeni Kayıt"):
+        for k in ("live_t","live_R","live_G","live_B","live_Gray"):
+            st.session_state[k] = []
+        st.session_state["start_ts"] = None
+        with st.spinner("Temizlendi…"):
+            time.sleep(0.2)
 
-    # Canlı grafik
-    if len(st.session_state["live_t"]) > 1:
-        dfp = pd.DataFrame({
-            "time": st.session_state["live_t"],
-            "R": st.session_state["live_R"],
-            "G": st.session_state["live_G"],
-            "B": st.session_state["live_B"],
-        })
-        dfp["Gray"] = 0.114*dfp["B"] + 0.587*dfp["G"] + 0.299*dfp["R"]
-
+    # --- Canlı çizim: R,G,B,Gray birlikte ---
+    placeholder = st.empty()
+    legend_show = st.checkbox("Lejantı göster", True)
+    if ctx and ctx.state.playing:
+        # İlk boş figür
         fig = go.Figure()
-        for name, color in [("R", "red"), ("G", "green"), ("B", "blue"), ("Gray", "black")]:
-            fig.add_trace(go.Scatter(x=dfp["time"], y=dfp[name], mode="lines", name=name, line=dict(color=color)))
-        fig.update_layout(height=350, xaxis_title="Zaman (s)", yaxis_title="Mean Intensity (0-255)", template="simple_white")
-        st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(x=[], y=[], mode="lines", name="R",    line=dict(color="red")))
+        fig.add_trace(go.Scatter(x=[], y=[], mode="lines", name="G",    line=dict(color="green")))
+        fig.add_trace(go.Scatter(x=[], y=[], mode="lines", name="B",    line=dict(color="blue")))
+        fig.add_trace(go.Scatter(x=[], y=[], mode="lines", name="Gray", line=dict(color="black")))
+        fig.update_layout(height=360, template="simple_white",
+                          xaxis_title="Zaman (s)", yaxis_title="Mean Intensity (0-255)",
+                          showlegend=legend_show)
+        plot = placeholder.plotly_chart(fig, use_container_width=True)
+
+        last_refresh = time.time()
+        # Oynarken kuyruktan veri çek → hem diziye ekle hem grafiği güncelle
+        while ctx.state.playing:
+            drained = 0
+            try:
+                # bir seferde mümkün olduğunca çok veri çek (akıcı çizim için)
+                while True:
+                    t, r, g, b = st.session_state["live_q"].get_nowait()
+                    gray = 0.114*b + 0.587*g + 0.299*r
+                    st.session_state["live_t"].append(t)
+                    st.session_state["live_R"].append(r)
+                    st.session_state["live_G"].append(g)
+                    st.session_state["live_B"].append(b)
+                    st.session_state["live_Gray"].append(gray)
+                    drained += 1
+            except queue.Empty:
+                pass
+
+            # 50–100 ms’de bir grafiği güncelle
+            if drained > 0 and (time.time() - last_refresh) > 0.08:
+                t  = st.session_state["live_t"]
+                R  = st.session_state["live_R"]
+                G  = st.session_state["live_G"]
+                B  = st.session_state["live_B"]
+                Gy = st.session_state["live_Gray"]
+
+                fig.data[0].x, fig.data[0].y = t, R
+                fig.data[1].x, fig.data[1].y = t, G
+                fig.data[2].x, fig.data[2].y = t, B
+                fig.data[3].x, fig.data[3].y = t, Gy
+                fig.update_layout(showlegend=legend_show)
+                plot = placeholder.plotly_chart(fig, use_container_width=True)
+                last_refresh = time.time()
+
+            time.sleep(0.02)  # CPU’yu yorma
+
 
 # ------------- 2) ÖNCEKİ VİDEODAN ANALİZ -------------
 with tab_upload:
@@ -282,4 +305,5 @@ with tab_analyze:
         # Grafiği PNG olarak indirme (basit ekran görüntüsü yaklaşımı)
         png_bytes = fig.to_image(format="png", width=1200, height=500, scale=2)
         st.download_button("🖼️ Grafiği PNG indir", png_bytes, file_name="analysis.png", mime="image/png")
+
 
