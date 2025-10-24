@@ -1,3 +1,5 @@
+import queue
+import time
 import io, av, time, math, base64
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -280,3 +282,4 @@ with tab_analyze:
         # Grafiği PNG olarak indirme (basit ekran görüntüsü yaklaşımı)
         png_bytes = fig.to_image(format="png", width=1200, height=500, scale=2)
         st.download_button("🖼️ Grafiği PNG indir", png_bytes, file_name="analysis.png", mime="image/png")
+
